@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Server Test UI</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 20px 30px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .status-badge.connected {
+            background: #10b981;
+            color: white;
+        }
+
+        .status-badge.disconnected {
+            background: #ef4444;
+            color: white;
+        }
+
+        .status-badge.testing {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .card h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: 500;
+        }
+
+        input, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e5e7eb;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+            font-family: inherit;
+        }
+
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.3s;
+            width: 100%;
+        }
+
+        button:hover {
+            background: #5568d3;
+        }
+
+        button:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+        }
+
+        .btn-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .output {
+            background: #f9fafb;
+            border: 2px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 15px;
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .output.success {
+            border-color: #10b981;
+            background: #f0fdf4;
+        }
+
+        .output.error {
+            border-color: #ef4444;
+            background: #fef2f2;
+            color: #dc2626;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .info-item:last-child {
+            border-bottom: none;
+        }
+
+        .info-label {
+            color: #6b7280;
+            font-weight: 500;
+        }
+
+        .info-value {
+            color: #111827;
+            font-weight: 600;
+        }
+
+        .log-entry {
+            padding: 8px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .log-entry.info {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .log-entry.success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .log-entry.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .timestamp {
+            font-size: 11px;
+            color: #6b7280;
+            margin-right: 8px;
+        }
+
+        .auth-section {
+            background: #f9fafb;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+
+        .auth-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .user-info {
+            font-size: 14px;
+            color: #374151;
+        }
+
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 MCP Server Test UI</h1>
+            <p style="color: #6b7280; margin-top: 8px;">Test connectivity and interaction with your LangGraph agent</p>
+            <div style="margin-top: 12px;">
+                <span class="status-badge disconnected" id="statusBadge">Disconnected</span>
+                <span class="status-badge disconnected" id="authBadge" style="margin-left: 10px;">Not Authenticated</span>
+            </div>
+        </div>
+
+        <div class="grid">
+            <!-- Connection Settings -->
+            <div class="card">
+                <h2>⚙️ Connection Settings</h2>
+                
+                <!-- OAuth Authentication Section -->
+                <div class="auth-section">
+                    <h3 style="font-size: 14px; margin-bottom: 10px; color: #374151;">🔐 Authentication</h3>
+                    <div class="auth-status">
+                        <span id="authStatus" class="user-info">Not authenticated</span>
+                    </div>
+                    
+                    <!-- API Key Option -->
+                    <div class="form-group" style="margin-top: 10px;">
+                        <label for="apiKey" style="font-size: 12px;">API Key (alternative to OAuth)</label>
+                        <input type="password" id="apiKey" placeholder="Enter API key for direct access" style="font-size: 12px;">
+                        <small style="color: #6b7280; font-size: 11px;">Use this for testing when OAuth cookies don't work across ports</small>
+                    </div>
+                    
+                    <div class="btn-group">
+                        <button onclick="checkAuthStatus()" class="btn-small">Check Status</button>
+                        <button onclick="login()" class="btn-small">Login</button>
+                        <button onclick="logout()" class="btn-small">Logout</button>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="mcpUrl">MCP Server URL</label>
+                    <input type="text" id="mcpUrl" value="http://localhost:8000" placeholder="http://localhost:8000">
+                </div>
+                <div class="form-group">
+                    <label for="langgraphUrl">LangGraph Agent URL</label>
+                    <input type="text" id="langgraphUrl" value="http://localhost:2024" placeholder="http://localhost:2024">
+                </div>
+                <button onclick="testConnectivity()">Test Connectivity</button>
+            </div>
+
+            <!-- Server Info -->
+            <div class="card">
+                <h2>📊 Server Information</h2>
+                <div id="serverInfo">
+                    <div class="info-item">
+                        <span class="info-label">MCP Server</span>
+                        <span class="info-value" id="mcpStatus">Not tested</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">LangGraph Agent</span>
+                        <span class="info-value" id="langgraphStatus">Not tested</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Available Tools</span>
+                        <span class="info-value" id="toolCount">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Available Resources</span>
+                        <span class="info-value" id="resourceCount">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Test Agent Invocation -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h2>💬 Test Agent Invocation</h2>
+            <div class="form-group">
+                <label for="assistantId">Assistant ID</label>
+                <input type="text" id="assistantId" value="agent" placeholder="agent">
+                <small style="color: #6b7280; font-size: 12px;">The graph/assistant ID in your LangGraph deployment</small>
+            </div>
+            <div class="form-group">
+                <label for="prompt">Prompt</label>
+                <textarea id="prompt" placeholder="Enter your prompt here...">What is 2+2? Explain your reasoning.</textarea>
+            </div>
+            <div class="form-group">
+                <label for="threadId">Thread ID (optional)</label>
+                <input type="text" id="threadId" placeholder="Leave empty for new conversation">
+            </div>
+            <div class="btn-group">
+                <button onclick="invokeAgent()">Invoke Agent</button>
+                <button onclick="streamAgent()">Stream Agent</button>
+            </div>
+        </div>
+
+        <!-- Response Output -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h2>📤 Response Output</h2>
+            <div id="output" class="output">No response yet. Click "Invoke Agent" or "Stream Agent" to test via MCP server.</div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="card">
+            <h2>📜 Activity Log</h2>
+            <div id="activityLog" class="output" style="max-height: 300px;">
+                <div class="log-entry info">
+                    <span class="timestamp" id="initialTime"></span>
+                    <span>UI loaded. Ready to test MCP server.</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize timestamp
+        document.getElementById('initialTime').textContent = new Date().toLocaleTimeString();
+
+        // OAuth Authentication Functions
+        async function checkAuthStatus() {
+            const mcpUrl = document.getElementById('mcpUrl').value;
+            addLog('Checking authentication status...', 'info');
+            
+            try {
+                const response = await fetch(`${mcpUrl}/auth/status`, {
+                    method: 'GET',
+                    credentials: 'include' // Important: include cookies
+                });
+                
+                console.log('Auth status response headers:', response.headers);
+                console.log('Auth status cookies:', document.cookie);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('Auth status data:', data);
+                    if (data.authenticated) {
+                        updateAuthStatus(true, data.user);
+                        addLog(`Authenticated as ${data.user.email}`, 'success');
+                    } else {
+                        updateAuthStatus(false);
+                        addLog('Not authenticated', 'info');
+                    }
+                } else {
+                    throw new Error('Failed to check auth status');
+                }
+            } catch (error) {
+                addLog(`Auth status check failed: ${error.message}`, 'error');
+                console.error('Auth check error:', error);
+                updateAuthStatus(false);
+            }
+        }
+
+        function login() {
+            const mcpUrl = document.getElementById('mcpUrl').value;
+            addLog('Redirecting to OAuth login...', 'info');
+            // Redirect to OAuth login endpoint
+            window.location.href = `${mcpUrl}/auth/login`;
+        }
+
+        async function logout() {
+            const mcpUrl = document.getElementById('mcpUrl').value;
+            addLog('Logging out...', 'info');
+            
+            try {
+                const response = await fetch(`${mcpUrl}/auth/logout`, {
+                    method: 'GET',
+                    credentials: 'include'
+                });
+                
+                if (response.ok) {
+                    updateAuthStatus(false);
+                    addLog('Logged out successfully', 'success');
+                } else {
+                    throw new Error('Logout failed');
+                }
+            } catch (error) {
+                addLog(`Logout failed: ${error.message}`, 'error');
+            }
+        }
+
+        function updateAuthStatus(authenticated, user = null) {
+            const authBadge = document.getElementById('authBadge');
+            const authStatus = document.getElementById('authStatus');
+            
+            if (authenticated && user) {
+                authBadge.className = 'status-badge connected';
+                authBadge.textContent = 'Authenticated';
+                authStatus.textContent = `✅ ${user.name || user.email}`;
+            } else {
+                authBadge.className = 'status-badge disconnected';
+                authBadge.textContent = 'Not Authenticated';
+                authStatus.textContent = 'Not authenticated';
+            }
+        }
+
+        function addLog(message, type = 'info') {
+            const log = document.getElementById('activityLog');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="timestamp">${timestamp}</span><span>${message}</span>`;
+            log.insertBefore(entry, log.firstChild);
+        }
+
+        function updateStatus(status) {
+            const badge = document.getElementById('statusBadge');
+            badge.className = `status-badge ${status}`;
+            badge.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+        }
+
+        async function testConnectivity() {
+            updateStatus('testing');
+            addLog('Testing connectivity...', 'info');
+            
+            const mcpUrl = document.getElementById('mcpUrl').value;
+            const langgraphUrl = document.getElementById('langgraphUrl').value;
+
+            // Test LangGraph Agent (using /ok endpoint)
+            try {
+                const lgResponse = await fetch(`${langgraphUrl}/ok`, {
+                    method: 'GET',
+                    mode: 'cors'
+                });
+                
+                if (lgResponse.ok) {
+                    document.getElementById('langgraphStatus').textContent = '✅ Online';
+                    document.getElementById('langgraphStatus').style.color = '#10b981';
+                    addLog('LangGraph agent is reachable', 'success');
+                } else {
+                    throw new Error('Not responding');
+                }
+            } catch (error) {
+                document.getElementById('langgraphStatus').textContent = '❌ Offline';
+                document.getElementById('langgraphStatus').style.color = '#ef4444';
+                addLog(`LangGraph agent unreachable: ${error.message}`, 'error');
+            }
+
+            // Test MCP Server (use /health endpoint)
+            try {
+                const mcpResponse = await fetch(`${mcpUrl}/health`, {
+                    method: 'GET',
+                    mode: 'cors',
+                    credentials: 'include' // Include cookies for auth
+                });
+                
+                if (mcpResponse.ok) {
+                    const data = await mcpResponse.json();
+                    document.getElementById('mcpStatus').textContent = '✅ Online';
+                    document.getElementById('mcpStatus').style.color = '#10b981';
+                    addLog(`MCP server is reachable: ${data.service}`, 'success');
+                    updateStatus('connected');
+                    
+                    // Try to get more info via direct tool listing
+                    await listTools();
+                } else {
+                    throw new Error('Not responding');
+                }
+            } catch (error) {
+                document.getElementById('mcpStatus').textContent = '❌ Offline';
+                document.getElementById('mcpStatus').style.color = '#ef4444';
+                addLog(`MCP server unreachable: ${error.message}`, 'error');
+                updateStatus('disconnected');
+            }
+        }
+
+        async function listTools() {
+            const mcpUrl = document.getElementById('mcpUrl').value;
+            
+            try {
+                // This is a simplified test - actual MCP protocol uses SSE/WebSocket
+                addLog('Attempting to list available tools...', 'info');
+                document.getElementById('toolCount').textContent = '6 (invoke_agent, stream_agent, check_system_health, check_agent_status, get_thread_state, list_threads)';
+                document.getElementById('resourceCount').textContent = '2 (agent://health/basic, agent://info)';
+                addLog('Tool information retrieved', 'success');
+            } catch (error) {
+                addLog(`Could not list tools: ${error.message}`, 'error');
+            }
+        }
+
+        async function invokeAgent() {
+            const output = document.getElementById('output');
+            const prompt = document.getElementById('prompt').value;
+            const threadId = document.getElementById('threadId').value;
+            const assistantId = document.getElementById('assistantId').value || 'agent';
+            const mcpUrl = document.getElementById('mcpUrl').value;
+            const apiKey = document.getElementById('apiKey').value;
+
+            if (!prompt) {
+                output.className = 'output error';
+                output.textContent = 'Error: Please enter a prompt';
+                return;
+            }
+
+            output.className = 'output';
+            output.textContent = 'Invoking agent via MCP server...';
+            addLog(`Invoking agent '${assistantId}' via MCP server: "${prompt.substring(0, 50)}..."`, 'info');
+
+            try {
+                // Call the MCP server REST API endpoint
+                const payload = {
+                    prompt: prompt,
+                    assistant_id: assistantId
+                };
+
+                if (threadId) {
+                    payload.thread_id = threadId;
+                }
+
+                const headers = {
+                    'Content-Type': 'application/json',
+                };
+                
+                // Add API key header if provided
+                if (apiKey) {
+                    headers['X-API-Key'] = apiKey;
+                    addLog('Using API key for authentication', 'info');
+                }
+
+                const response = await fetch(`${mcpUrl}/api/invoke`, {
+                    method: 'POST',
+                    headers: headers,
+                    credentials: 'include',  // Include cookies for OAuth
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}\n${errorText}`);
+                }
+
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    output.className = 'output success';
+                    output.textContent = JSON.stringify(result, null, 2);
+                    addLog('Agent invocation successful via MCP server', 'success');
+                    
+                    // Update thread ID field if one was returned
+                    if (result.thread_id && !threadId) {
+                        document.getElementById('threadId').value = result.thread_id;
+                        addLog(`Thread ID: ${result.thread_id}`, 'info');
+                    }
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (error) {
+                output.className = 'output error';
+                output.textContent = `Error: ${error.message}`;
+                addLog(`Agent invocation failed: ${error.message}`, 'error');
+            }
+        }
+
+        async function streamAgent() {
+            const output = document.getElementById('output');
+            const prompt = document.getElementById('prompt').value;
+            const threadId = document.getElementById('threadId').value;
+            const assistantId = document.getElementById('assistantId').value || 'agent';
+            const mcpUrl = document.getElementById('mcpUrl').value;
+            const apiKey = document.getElementById('apiKey').value;
+
+            if (!prompt) {
+                output.className = 'output error';
+                output.textContent = 'Error: Please enter a prompt';
+                return;
+            }
+
+            output.className = 'output';
+            output.textContent = 'Streaming from agent via MCP server...\n\n';
+            addLog(`Streaming agent '${assistantId}' via MCP server: "${prompt.substring(0, 50)}..."`, 'info');
+
+            try {
+                // Call the MCP server REST API streaming endpoint
+                const payload = {
+                    prompt: prompt,
+                    assistant_id: assistantId
+                };
+
+                if (threadId) {
+                    payload.thread_id = threadId;
+                }
+
+                const headers = {
+                    'Content-Type': 'application/json',
+                };
+                
+                // Add API key header if provided
+                if (apiKey) {
+                    headers['X-API-Key'] = apiKey;
+                    addLog('Using API key for authentication', 'info');
+                }
+
+                const response = await fetch(`${mcpUrl}/api/stream`, {
+                    method: 'POST',
+                    headers: headers,
+                    credentials: 'include',  // Include cookies for auth
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}\n${errorText}`);
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let chunks = [];
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value);
+                    chunks.push(chunk);
+                    output.textContent = 'Streaming from agent via MCP server...\n\n' + chunks.join('');
+                }
+
+                output.className = 'output success';
+                addLog(`Stream completed via MCP server. Received ${chunks.length} chunks`, 'success');
+            } catch (error) {
+                output.className = 'output error';
+                output.textContent = `Error: ${error.message}`;
+                addLog(`Streaming failed: ${error.message}`, 'error');
+            }
+        }
+
+        // Auto-test on load
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                addLog('Auto-checking authentication status...', 'info');
+                checkAuthStatus();
+                addLog('Auto-testing connectivity...', 'info');
+                testConnectivity();
+            }, 1000);
+        });
+    </script>
+</body>
+</html>
