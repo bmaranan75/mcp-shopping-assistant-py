@@ -261,6 +261,22 @@ This server is designed for ChatGPT Enterprise integration with:
 4. **Context Support**: Logging and progress reporting
 5. **Error Handling**: Comprehensive error responses
 
+### 📚 Enterprise Apps & Connectors Documentation
+
+**Having trouble integrating with ChatGPT Enterprise "Apps & Connectors"?**
+
+We've created comprehensive documentation to help you:
+
+- **[Start Here: Executive Summary](EXECUTIVE_SUMMARY.md)** - Quick overview of the issue and solutions
+- **[Full Research Report](ENTERPRISE_APPS_CONNECTORS_RESEARCH.md)** - Detailed technical analysis
+- **[Troubleshooting Checklist](ENTERPRISE_TROUBLESHOOTING_CHECKLIST.md)** - Step-by-step diagnostic guide
+- **[Code Fixes Guide](ENTERPRISE_CODE_FIXES.md)** - Ready-to-implement improvements
+- **[Enterprise Admin Guide](ENTERPRISE_ADMIN_GUIDE.md)** - For workspace administrators
+- **[Visual Architecture Guide](ENTERPRISE_VISUAL_GUIDE.md)** - Diagrams and flow charts
+- **[Complete Documentation Index](ENTERPRISE_INTEGRATION_INDEX.md)** - All resources in one place
+
+**TL;DR**: If your OpenAPI server works in Custom GPTs but not in Enterprise "Apps & Connectors", it's likely due to Enterprise workspace domain restrictions. Contact your Enterprise admin to whitelist `mcp.marananapp.com` in the GPT Actions settings.
+
 ### ChatGPT Configuration
 
 Add to your ChatGPT Enterprise MCP configuration:

@@ -48,6 +48,30 @@ OKTA_CLIENT_SECRET = os.getenv("OKTA_CLIENT_SECRET", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
+# Public endpoints that don't require authentication (ChatGPT Enterprise compatibility)
+PUBLIC_ENDPOINTS = {
+    "/health",
+    "/.well-known/ai-plugin.json",
+    "/.well-known/openid-configuration",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/jwks.json",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server/openapi.json",
+    "/.well-known/openid-configuration/openapi.json",
+    "/.well-known/oauth-protected-resource/openapi.json",
+    "/openapi.json/.well-known/openid-configuration",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/openapi.actions.json",
+    "/openapi.test.json",
+    "/favicon.ico",
+    "/logo.png",
+    "/test",
+    "/telephony",
+    "/"
+}
+
 # Create FastAPI app with OpenAPI metadata
 app = FastAPI(
     title="LangGraph Agent API",
@@ -156,6 +180,97 @@ async def openapi_actions():
     return _get_actions_openapi_schema()
 
 
+@app.get("/openapi.test.json")
+async def openapi_test():
+    """Minimal OpenAPI schema for testing connectivity."""
+    return {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "LangGraph Agent API - Test",
+            "description": "Minimal test schema for verifying "
+                          "ChatGPT Enterprise connectivity",
+            "version": "1.0.0"
+        },
+        "servers": [
+            {
+                "url": SERVER_BASE_URL,
+                "description": "API Server"
+            }
+        ],
+        "paths": {
+            "/health": {
+                "get": {
+                    "operationId": "health_check",
+                    "summary": "Health Check",
+                    "description": "Check if the API server is healthy",
+                    "tags": ["System"],
+                    "responses": {
+                        "200": {
+                            "description": "Server is healthy",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {
+                                                "type": "string",
+                                                "example": "healthy"
+                                            },
+                                            "service": {
+                                                "type": "string"
+                                            },
+                                            "version": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/test": {
+                "get": {
+                    "operationId": "test_connection",
+                    "summary": "Test Connection",
+                    "description": "Test API connectivity",
+                    "tags": ["Testing"],
+                    "responses": {
+                        "200": {
+                            "description": "Connection successful",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {
+                                                "type": "string"
+                                            },
+                                            "message": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "securitySchemes": {
+                "ApiKeyAuth": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "X-API-Key"
+                }
+            }
+        }
+    }
+
+
 # Add session middleware
 app.add_middleware(
     SessionMiddleware,
@@ -171,6 +286,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Request logging middleware for debugging Enterprise integration
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all requests for debugging Enterprise integration."""
+    import time
+    from datetime import datetime
+    
+    start_time = time.time()
+    
+    # Log incoming request
+    print(f"\\n{'='*70}")
+    print(f"📥 REQUEST - {datetime.now().isoformat()}")
+    print(f"{'='*70}")
+    print(f"Method: {request.method}")
+    print(f"Path: {request.url.path}")
+    print(f"Client: {request.client.host if request.client else 'Unknown'}")
+    
+    # Check if from ChatGPT
+    user_agent = request.headers.get("user-agent", "")
+    if "ChatGPT" in user_agent or "OpenAI" in user_agent:
+        print("🤖 REQUEST FROM CHATGPT/OPENAI DETECTED!")
+    
+    # Process request
+    try:
+        response = await call_next(request)
+        duration = time.time() - start_time
+        
+        # Log response
+        print(f"\\n📤 RESPONSE: {response.status_code} "
+              f"({duration:.3f}s)")
+        if response.status_code >= 400:
+            print(f"⚠️  ERROR")
+        else:
+            print(f"✅ SUCCESS")
+        print(f"{'='*70}\\n")
+        
+        return response
+        
+    except Exception as e:
+        print(f"\\n❌ EXCEPTION: {str(e)}")
+        print(f"{'='*70}\\n")
+        raise
 
 
 # OAuth2 scheme for Client Credentials flow (ChatGPT Enterprise)
@@ -287,6 +446,11 @@ class OAuthConfigResponse(BaseModel):
 
 async def verify_token(request: Request):
     """Verify OAuth token (from Okta) or API key."""
+    
+    # Allow public endpoints without authentication (Enterprise compatibility)
+    if request.url.path in PUBLIC_ENDPOINTS:
+        print(f"DEBUG: ✅ Public endpoint accessed: {request.url.path}")
+        return {"authenticated": True, "method": "public", "public": True}
     
     # DEBUG: Log all headers received
     print("=" * 70)
@@ -443,18 +607,15 @@ async def ai_plugin_manifest():
             "endpoint for longer queries."
         ),
         "auth": {
-            "type": "oauth",
-            "client_url": f"{SERVER_BASE_URL}/oauth/authorize",
-            "scope": "",
-            "authorization_url": f"{SERVER_BASE_URL}/oauth/token",
-            "authorization_content_type": "application/x-www-form-urlencoded",
+            "type": "service_http",
+            "authorization_type": "bearer",
             "verification_tokens": {
-                "openai": OKTA_CLIENT_ID or "openai-verification-token"
+                "openai": OKTA_CLIENT_ID or "your-verification-token-here"
             }
         },
         "api": {
             "type": "openapi",
-            "url": f"{SERVER_BASE_URL}/openapi.json",
+            "url": f"{SERVER_BASE_URL}/openapi.actions.json",
             "is_user_authenticated": False
         },
         "logo_url": f"{SERVER_BASE_URL}/logo.png",
@@ -637,6 +798,54 @@ async def oauth_userinfo(auth: dict = Depends(verify_token)):
         "name": "API Key User",
         "email": "api@example.com",
         "email_verified": False
+    }
+
+
+# ==========================================
+# Telephony Endpoint (No Authentication Required)
+# ==========================================
+
+@app.post("/telephony")
+async def telephony_webhook(request: Request):
+    """
+    Simple telephony webhook endpoint that logs headers and body.
+    No authentication required.
+    """
+    # Get all headers
+    headers = dict(request.headers)
+    
+    # Get the raw body
+    body = await request.body()
+    
+    # Try to parse as JSON, fallback to raw text
+    try:
+        body_json = await request.json()
+        body_content = body_json
+    except:
+        body_content = body.decode('utf-8') if body else ""
+    
+    # Log everything
+    print("=" * 70)
+    print("TELEPHONY WEBHOOK RECEIVED")
+    print("=" * 70)
+    print("\n📞 HEADERS:")
+    for header_name, header_value in headers.items():
+        print(f"  {header_name}: {header_value}")
+    
+    print("\n📄 BODY:")
+    if isinstance(body_content, dict):
+        print(json.dumps(body_content, indent=2))
+    else:
+        print(body_content)
+    print("=" * 70)
+    print()
+    
+    # Return a simple success response
+    return {
+        "status": "received",
+        "message": "Telephony webhook processed successfully",
+        "headers_received": len(headers),
+        "body_size": len(body)
     }
 
 
@@ -910,7 +1119,8 @@ async def privacy_policy():
     "/health",
     response_model=HealthResponse,
     summary="Health Check",
-    tags=["System"]
+    tags=["System"],
+    description="Check API health status."
 )
 async def health_check():
     """Check API health status."""
@@ -919,6 +1129,27 @@ async def health_check():
         "service": "LangGraph Agent API",
         "version": "1.0.0",
         "auth_enabled": OAUTH_ENABLED
+    }
+
+
+@app.get(
+    "/test",
+    summary="Test Connection",
+    description="Simple test endpoint that returns a success message. "
+                "Use this to verify connectivity between ChatGPT "
+                "Enterprise and your API.",
+    tags=["Testing"],
+    operation_id="test_connection"
+)
+async def test_endpoint():
+    """Test endpoint for verifying connectivity."""
+    from datetime import datetime
+    return {
+        "status": "success",
+        "message": "Connection to LangGraph Agent API is working!",
+        "timestamp": datetime.now().isoformat(),
+        "server": SERVER_BASE_URL,
+        "version": "1.0.0"
     }
 
 
