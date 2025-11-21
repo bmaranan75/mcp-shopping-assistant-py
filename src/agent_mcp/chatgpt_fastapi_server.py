@@ -22,10 +22,13 @@ Usage:
 import httpx
 import json
 import os
+import secrets
+import time
 from typing import Any, Dict, Optional
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import uvicorn
@@ -38,12 +41,176 @@ LANGGRAPH_BASE_URL = os.getenv("LANGGRAPH_BASE_URL", "http://localhost:2024")
 CHATGPT_MCP_PORT = int(os.getenv("CHATGPT_MCP_PORT", "8001"))
 API_KEYS = os.getenv("API_KEYS", "").split(",") if os.getenv("API_KEYS") else []
 
+# Server URL configuration
+SERVER_URL = os.getenv("SERVER_URL", f"http://localhost:{CHATGPT_MCP_PORT}")
+
+# OAuth 2.0 Configuration
+OAUTH_ENABLED = os.getenv("CHATGPT_OAUTH_ENABLED", "false").lower() == "true"
+OAUTH_CLIENT_ID = os.getenv("CHATGPT_OAUTH_CLIENT_ID", "")
+OAUTH_CLIENT_SECRET = os.getenv("CHATGPT_OAUTH_CLIENT_SECRET", "")
+OAUTH_TOKEN_EXPIRY = int(os.getenv("CHATGPT_OAUTH_TOKEN_EXPIRY", "3600"))
+OAUTH_ISSUER = os.getenv("OAUTH_ISSUER", SERVER_URL)
+OAUTH_TOKEN_ENDPOINT = os.getenv("OAUTH_TOKEN_ENDPOINT", f"{SERVER_URL}/oauth/token")
+
+# Okta Configuration (for external token validation)
+OKTA_INTROSPECT_URL = os.getenv("OKTA_INTROSPECT_URL", "")
+OKTA_DOMAIN = os.getenv("OKTA_DOMAIN", "")
+
+# In-memory token storage (use Redis in production)
+active_tokens: Dict[str, Dict[str, Any]] = {}
+
 # Initialize FastAPI
 app = FastAPI(
     title="LangGraph Agent MCP Server",
     description="ChatGPT Enterprise compatible MCP server for LangGraph agents",
     version="1.0.0"
 )
+
+# OAuth 2.0 Models
+class TokenRequest(BaseModel):
+    grant_type: str
+    client_id: str
+    client_secret: str
+    scope: Optional[str] = "mcp:access"
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int
+    scope: str
+
+
+# Security
+security = HTTPBearer(auto_error=False)
+
+
+async def validate_okta_token(token: str) -> bool:
+    """Validate token with Okta introspection endpoint."""
+    if not OKTA_INTROSPECT_URL:
+        print("⚠️  Okta introspection URL not configured")
+        return False
+    
+    try:
+        print(f"🔍 Validating token with Okta: {OKTA_INTROSPECT_URL}")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                OKTA_INTROSPECT_URL,
+                auth=(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET),
+                data={"token": token, "token_type_hint": "access_token"}
+            )
+            
+            print(f"Okta response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"Okta response: {json.dumps(data, indent=2)}")
+                
+                is_active = data.get("active", False)
+                if is_active:
+                    print("✓ Okta token is active and valid")
+                    return True
+                else:
+                    print("✗ Okta token is inactive or invalid")
+                    return False
+            else:
+                print(f"✗ Okta introspection failed: {response.status_code}")
+                print(f"Response: {response.text}")
+                return False
+    except Exception as e:
+        print(f"✗ Error validating token with Okta: {e}")
+        return False
+
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Verify OAuth token or API key."""
+    print("\n" + "=" * 80)
+    print("AUTHENTICATION CHECK")
+    print("=" * 80)
+    print(f"OAuth Enabled: {OAUTH_ENABLED}")
+    print(f"Credentials Provided: {credentials is not None}")
+    
+    if not OAUTH_ENABLED:
+        print("✓ OAuth disabled, allowing request")
+        print("=" * 80 + "\n")
+        return True
+    
+    if not credentials:
+        print("✗ No credentials provided (missing Authorization header)")
+        print(f"Active tokens in memory: {len(active_tokens)}")
+        print(f"API keys configured: {len(API_KEYS)}")
+        print("=" * 80 + "\n")
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    
+    token = credentials.credentials
+    print(f"Token received: {token[:20]}..." if len(token) > 20 else f"Token: {token}")
+    print(f"Token length: {len(token)}")
+    
+    # Check if it's a valid OAuth token
+    print(f"\nChecking against {len(active_tokens)} active tokens...")
+    if token in active_tokens:
+        token_data = active_tokens[token]
+        expires_at = token_data["expires_at"]
+        current_time = time.time()
+        time_remaining = expires_at - current_time
+        
+        print(f"✓ Token found in active tokens")
+        print(f"  Expires at: {expires_at}")
+        print(f"  Current time: {current_time}")
+        print(f"  Time remaining: {time_remaining:.0f} seconds")
+        
+        if token_data["expires_at"] > time.time():
+            print("✓ Token is valid and not expired")
+            print("=" * 80 + "\n")
+            return token_data
+        else:
+            # Token expired
+            del active_tokens[token]
+            print("✗ Token expired, removing from active tokens")
+            print("=" * 80 + "\n")
+            raise HTTPException(
+                status_code=401,
+                detail="Token expired",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+    
+    # Check if it's a valid API key
+    print(f"\nToken not in active tokens, checking API keys...")
+    print(f"Configured API keys: {len(API_KEYS)}")
+    if API_KEYS:
+        for i, key in enumerate(API_KEYS):
+            print(f"  API Key {i+1}: {key[:10]}..." if len(key) > 10 else f"  API Key {i+1}: {key}")
+    
+    if API_KEYS and token in API_KEYS:
+        print("✓ Valid API key")
+        print("=" * 80 + "\n")
+        return {"type": "api_key", "valid": True}
+    
+    # Try validating with Okta (external OAuth provider)
+    print(f"\nToken not in API keys, trying Okta validation...")
+    print(f"Okta introspection URL configured: {bool(OKTA_INTROSPECT_URL)}")
+    
+    if OKTA_INTROSPECT_URL:
+        is_valid = await validate_okta_token(token)
+        if is_valid:
+            print("✓ Token validated by Okta")
+            print("=" * 80 + "\n")
+            return {"type": "okta_token", "valid": True}
+    
+    print("✗ Invalid token - not found in active tokens, API keys, or Okta")
+    print(f"Token to validate: {token[:30]}...")
+    print(f"Active tokens: {list(active_tokens.keys())[:3]}..." if active_tokens else "Active tokens: []")
+    print("=" * 80 + "\n")
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid token or API key",
+        headers={"WWW-Authenticate": "Bearer"}
+    )
+
 
 # Add CORS middleware
 app.add_middleware(
@@ -53,6 +220,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ============================================================================
+# Request Logging Middleware
+# ============================================================================
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests with full details."""
+    print("\n" + "🔵" * 40)
+    print("INCOMING HTTP REQUEST")
+    print("🔵" * 40)
+    print(f"Method: {request.method}")
+    print(f"URL: {request.url}")
+    print(f"Path: {request.url.path}")
+    print(f"Client: {request.client.host if request.client else 'Unknown'}:{request.client.port if request.client else 'Unknown'}")
+    
+    print("\nHeaders:")
+    for header, value in request.headers.items():
+        print(f"  {header}: {value}")
+    
+    # For POST/PUT requests, try to read body
+    if request.method in ["POST", "PUT", "PATCH"]:
+        try:
+            body = await request.body()
+            if body:
+                print(f"\nBody ({len(body)} bytes):")
+                try:
+                    body_str = body.decode('utf-8')
+                    print(body_str)
+                    # Re-create request with body for downstream processing
+                    async def receive():
+                        return {"type": "http.request", "body": body}
+                    request._receive = receive
+                except Exception as e:
+                    print(f"[Could not decode body: {e}]")
+            else:
+                print("\nBody: (empty)")
+        except Exception as e:
+            print(f"\n[Error reading body: {e}]")
+    
+    print("🔵" * 40 + "\n")
+    
+    # Process the request
+    response = await call_next(request)
+    
+    # Log response status
+    print("\n" + "🟢" * 40)
+    print("HTTP RESPONSE")
+    print("🟢" * 40)
+    print(f"Status: {response.status_code}")
+    print("🟢" * 40 + "\n")
+    
+    return response
 
 
 # ============================================================================
@@ -439,7 +660,207 @@ async def execute_tool(tool_name: str, arguments: dict) -> dict:
 
 
 # ============================================================================
-# API Endpoints
+# OAuth 2.0 Endpoints
+# ============================================================================
+
+@app.post("/oauth/token")
+async def oauth_token(request: Request):
+    """OAuth 2.0 token endpoint for Client Credentials flow."""
+    if not OAUTH_ENABLED:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "unsupported_grant_type",
+                "error_description": "OAuth is not enabled"
+            }
+        )
+    
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid_request",
+                "error_description": "Invalid JSON body"
+            }
+        )
+    
+    grant_type = body.get("grant_type")
+    client_id = body.get("client_id")
+    client_secret = body.get("client_secret")
+    scope = body.get("scope", "mcp:access")
+    
+    # Validate grant type
+    if grant_type != "client_credentials":
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "unsupported_grant_type",
+                "error_description": "Only client_credentials supported"
+            }
+        )
+    
+    # Validate client credentials
+    if not client_id or not client_secret:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid_request",
+                "error_description": "client_id and client_secret required"
+            }
+        )
+    
+    if client_id != OAUTH_CLIENT_ID or client_secret != OAUTH_CLIENT_SECRET:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": "invalid_client",
+                "error_description": "Invalid client credentials"
+            }
+        )
+    
+    # Generate access token
+    access_token = secrets.token_urlsafe(32)
+    expires_at = time.time() + OAUTH_TOKEN_EXPIRY
+    
+    # Store token
+    active_tokens[access_token] = {
+        "client_id": client_id,
+        "scope": scope,
+        "expires_at": expires_at,
+        "created_at": time.time()
+    }
+    
+    print(f"[OAuth] Token issued for client: {client_id}, scope: {scope}")
+    
+    return JSONResponse({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": OAUTH_TOKEN_EXPIRY,
+        "scope": scope
+    })
+
+
+@app.get("/oauth/info")
+async def oauth_info():
+    """OAuth 2.0 configuration information."""
+    if not OAUTH_ENABLED:
+        return JSONResponse({
+            "enabled": False,
+            "message": "OAuth is not enabled"
+        })
+    
+    return JSONResponse({
+        "enabled": True,
+        "issuer": OAUTH_ISSUER,
+        "token_endpoint": OAUTH_TOKEN_ENDPOINT,
+        "grant_types_supported": ["client_credentials"],
+        "scopes_supported": ["mcp:access"],
+        "token_expiry_seconds": OAUTH_TOKEN_EXPIRY
+    })
+
+
+# ============================================================================
+# OAuth 2.0 Discovery Endpoints (RFC 8414)
+# ============================================================================
+
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_authorization_server_metadata():
+    """OAuth 2.0 Authorization Server Metadata (RFC 8414)."""
+    if not OAUTH_ENABLED:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "OAuth not enabled"}
+        )
+    
+    return JSONResponse({
+        "issuer": OAUTH_ISSUER,
+        "token_endpoint": OAUTH_TOKEN_ENDPOINT,
+        "token_endpoint_auth_methods_supported": [
+            "client_secret_post",
+            "client_secret_basic"
+        ],
+        "grant_types_supported": ["client_credentials"],
+        "response_types_supported": [],
+        "scopes_supported": ["mcp:access"],
+        "service_documentation": f"{SERVER_URL}/docs",
+        "revocation_endpoint_auth_methods_supported": [
+            "client_secret_post",
+            "client_secret_basic"
+        ]
+    })
+
+
+@app.get("/.well-known/oauth-authorization-server/mcp")
+async def oauth_authorization_server_mcp():
+    """OAuth 2.0 Authorization Server Metadata for MCP resource."""
+    return await oauth_authorization_server_metadata()
+
+
+@app.get("/.well-known/oauth-protected-resource")
+async def oauth_protected_resource_metadata():
+    """OAuth 2.0 Protected Resource Metadata."""
+    if not OAUTH_ENABLED:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "OAuth not enabled"}
+        )
+    
+    return JSONResponse({
+        "resource": SERVER_URL,
+        "authorization_servers": [OAUTH_ISSUER],
+        "scopes_supported": ["mcp:access"],
+        "bearer_methods_supported": ["header"],
+        "resource_documentation": f"{SERVER_URL}/docs"
+    })
+
+
+@app.get("/.well-known/oauth-protected-resource/mcp")
+async def oauth_protected_resource_mcp():
+    """OAuth 2.0 Protected Resource Metadata for MCP."""
+    return await oauth_protected_resource_metadata()
+
+
+@app.get("/.well-known/openid-configuration")
+async def openid_configuration():
+    """OpenID Connect Discovery metadata."""
+    if not OAUTH_ENABLED:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "OAuth not enabled"}
+        )
+    
+    return JSONResponse({
+        "issuer": OAUTH_ISSUER,
+        "token_endpoint": OAUTH_TOKEN_ENDPOINT,
+        "token_endpoint_auth_methods_supported": [
+            "client_secret_post",
+            "client_secret_basic"
+        ],
+        "grant_types_supported": ["client_credentials"],
+        "response_types_supported": [],
+        "scopes_supported": ["mcp:access"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": [],
+        "claims_supported": ["sub", "iat", "exp"]
+    })
+
+
+@app.get("/.well-known/openid-configuration/mcp")
+async def openid_configuration_mcp():
+    """OpenID Connect Discovery for MCP resource."""
+    return await openid_configuration()
+
+
+@app.get("/mcp/.well-known/openid-configuration")
+async def mcp_openid_configuration():
+    """OpenID Connect Discovery under /mcp path."""
+    return await openid_configuration()
+
+
+# ============================================================================
+# MCP Endpoints
 # ============================================================================
 
 @app.get("/")
@@ -615,12 +1036,37 @@ async def list_tools():
     }
 
 
+@app.get("/mcp")
+async def mcp_info():
+    """GET endpoint for /mcp - provides information about the MCP endpoint."""
+    return JSONResponse({
+        "name": "LangGraph Agent MCP Server",
+        "version": "1.0.0",
+        "protocol": "JSON-RPC 2.0",
+        "transport": "HTTP POST",
+        "authentication": "OAuth 2.0 Bearer Token" if OAUTH_ENABLED else "None",
+        "endpoints": {
+            "mcp": "POST /mcp (JSON-RPC 2.0 requests)",
+            "tools": "GET /tools (list available tools)",
+            "health": "GET /health (server health check)",
+            "oauth_token": "POST /oauth/token (get access token)" if OAUTH_ENABLED else None,
+            "oauth_info": "GET /oauth/info (OAuth configuration)" if OAUTH_ENABLED else None
+        },
+        "documentation": f"{SERVER_URL}/docs",
+        "message": "This endpoint accepts POST requests with JSON-RPC 2.0 format. Use POST /mcp with proper authentication."
+    })
+
+
 @app.post("/mcp")
-async def mcp_endpoint(request: Request):
+async def mcp_endpoint(
+    request: Request,
+    auth: dict = Depends(verify_token)
+):
     """
     Main MCP endpoint - JSON-RPC 2.0 compatible.
     
     This endpoint handles stateless JSON-RPC requests from ChatGPT Enterprise.
+    Requires OAuth token or API key authentication if OAuth is enabled.
     """
     # Log incoming request for debugging
     print("\n" + "=" * 80)
