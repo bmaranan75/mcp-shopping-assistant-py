@@ -37,6 +37,10 @@ PLUGIN_NAME = os.getenv("PLUGIN_NAME", "LangGraph Agent")
 
 # Okta Configuration
 OKTA_DOMAIN = os.getenv("OKTA_DOMAIN", "")
+OKTA_AUTHORIZE_URL = os.getenv(
+    "OKTA_AUTHORIZE_URL",
+    f"https://{os.getenv('OKTA_DOMAIN', '')}/oauth2/default/v1/authorize"
+)
 OKTA_INTROSPECT_URL = os.getenv(
     "OKTA_INTROSPECT_URL",
     f"https://{os.getenv('OKTA_DOMAIN', '')}/oauth2/default/v1/introspect"
@@ -530,10 +534,29 @@ async def verify_token(request: Request):
                         else:
                             print("DEBUG: ❌ Token is not active")
                             print("=" * 70)
+                            # Build re-authentication URL
+                            reauth_url = (
+                                f"{OKTA_AUTHORIZE_URL}?"
+                                f"client_id={OKTA_CLIENT_ID}&"
+                                f"response_type=code&"
+                                f"scope=openid%20profile%20email&"
+                                f"redirect_uri={SERVER_BASE_URL}/oauth/callback"
+                            )
+                            # Return OAuth-compliant error with re-auth link
                             raise HTTPException(
                                 status_code=401,
-                                detail="Token is not active or has expired",
-                                headers={"WWW-Authenticate": "Bearer"}
+                                detail=(
+                                    f"invalid_token: The access token expired. "
+                                    f"Please re-authenticate: {reauth_url}"
+                                ),
+                                headers={
+                                    "WWW-Authenticate": (
+                                        'Bearer realm="ChatGPT", '
+                                        'error="invalid_token", '
+                                        'error_description="The access token expired"'
+                                    ),
+                                    "X-Reauth-URL": reauth_url
+                                }
                             )
                     else:
                         print(
@@ -541,21 +564,57 @@ async def verify_token(request: Request):
                             f"{response.status_code}"
                         )
                         print("=" * 70)
+                        # Build re-authentication URL
+                        reauth_url = (
+                            f"{OKTA_AUTHORIZE_URL}?"
+                            f"client_id={OKTA_CLIENT_ID}&"
+                            f"response_type=code&"
+                            f"scope=openid%20profile%20email&"
+                            f"redirect_uri={SERVER_BASE_URL}/oauth/callback"
+                        )
                         raise HTTPException(
                             status_code=401,
                             detail=(
-                                f"Token validation failed with status "
-                                f"{response.status_code}"
+                                f"invalid_token: Token validation failed. "
+                                f"Please re-authenticate: {reauth_url}"
                             ),
-                            headers={"WWW-Authenticate": "Bearer"}
+                            headers={
+                                "WWW-Authenticate": (
+                                    'Bearer realm="ChatGPT", '
+                                    'error="invalid_token", '
+                                    'error_description="Token validation failed"'
+                                ),
+                                "X-Reauth-URL": reauth_url
+                            }
                         )
+            except HTTPException:
+                # Re-raise HTTP exceptions as-is
+                raise
             except Exception as e:
                 print(f"DEBUG: ❌ Token validation error: {e}")
                 print("=" * 70)
+                # Build re-authentication URL
+                reauth_url = (
+                    f"{OKTA_AUTHORIZE_URL}?"
+                    f"client_id={OKTA_CLIENT_ID}&"
+                    f"response_type=code&"
+                    f"scope=openid%20profile%20email&"
+                    f"redirect_uri={SERVER_BASE_URL}/oauth/callback"
+                )
                 raise HTTPException(
                     status_code=401,
-                    detail="Invalid or expired token",
-                    headers={"WWW-Authenticate": "Bearer"}
+                    detail=(
+                        f"invalid_token: The access token is invalid. "
+                        f"Please re-authenticate: {reauth_url}"
+                    ),
+                    headers={
+                        "WWW-Authenticate": (
+                            'Bearer realm="ChatGPT", '
+                            'error="invalid_token", '
+                            'error_description="The access token is invalid"'
+                        ),
+                        "X-Reauth-URL": reauth_url
+                    }
                 )
     
     # Check session
@@ -573,10 +632,29 @@ async def verify_token(request: Request):
     
     print("DEBUG: ❌ AUTHENTICATION FAILED - No valid credentials found")
     print("=" * 70)
+    # Build re-authentication URL
+    reauth_url = (
+        f"{OKTA_AUTHORIZE_URL}?"
+        f"client_id={OKTA_CLIENT_ID}&"
+        f"response_type=code&"
+        f"scope=openid%20profile%20email&"
+        f"redirect_uri={SERVER_BASE_URL}/oauth/callback"
+    )
+    # Return OAuth-compliant error with re-auth link
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Authentication required",
-        headers={"WWW-Authenticate": "Bearer"},
+        detail=(
+            f"invalid_token: Authentication required. "
+            f"Please authenticate here: {reauth_url}"
+        ),
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="ChatGPT", '
+                'error="invalid_token", '
+                'error_description="Authentication required"'
+            ),
+            "X-Reauth-URL": reauth_url
+        },
     )
 
 

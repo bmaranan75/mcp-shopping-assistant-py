@@ -125,18 +125,20 @@ async def invoke_agent(
                                     run_id = data[0]["run_id"]
                                 if "thread_id" in data[0]:
                                     thread_id_result = data[0]["thread_id"]
-                                # Store the last complete output
-                                final_output = data
+                                # Store last output as string to avoid
+                                # parsing issues
+                                final_output = chunk
                         except json.JSONDecodeError:
                             pass
                 
                 if ctx:
                     await ctx.info("Agent invocation completed successfully")
                 
+                # Return simple, serializable response
                 return {
-                    "run_id": run_id or "unknown",
-                    "thread_id": thread_id_result or "unknown",
-                    "output": final_output or {"messages": chunks},
+                    "run_id": str(run_id or "unknown"),
+                    "thread_id": str(thread_id_result or "unknown"),
+                    "output": final_output or "".join(chunks),
                     "status": "success"
                 }
             
@@ -211,6 +213,7 @@ async def stream_agent(
                         if ctx:
                             await ctx.report_progress(len(chunks), None)
                 
+                # Return simple string output
                 return {
                     "output": "".join(chunks),
                     "chunks_received": len(chunks),
@@ -294,14 +297,15 @@ async def check_system_health(
                                 # Extract run_id from metadata
                                 if "run_id" in data[0]:
                                     run_id = data[0]["run_id"]
-                                # Store the last complete output
-                                final_output = data
+                                # Store the last complete output as string
+                                final_output = chunk
                         except json.JSONDecodeError:
                             pass
                 
+                # Return simple serializable response
                 return {
-                    "health_check": final_output or {"messages": chunks},
-                    "run_id": run_id or "unknown",
+                    "health_check": final_output or "".join(chunks),
+                    "run_id": str(run_id or "unknown"),
                     "status": "success"
                 }
             
@@ -380,15 +384,16 @@ async def check_agent_status(
                                 # Extract run_id from metadata
                                 if "run_id" in data[0]:
                                     run_id = data[0]["run_id"]
-                                # Store the last complete output
-                                final_output = data
+                                # Store the last complete output as string
+                                final_output = chunk
                         except json.JSONDecodeError:
                             pass
                 
+                # Return simple serializable response
                 return {
-                    "agent": agent_name,
-                    "status_check": final_output or {"messages": chunks},
-                    "run_id": run_id or "unknown",
+                    "agent": str(agent_name),
+                    "status_check": final_output or "".join(chunks),
+                    "run_id": str(run_id or "unknown"),
                     "status": "success"
                 }
             
@@ -435,9 +440,12 @@ async def get_thread_state(
             )
             response.raise_for_status()
             
+            # Convert to string to ensure JSON serializability
+            state_data = response.text
+            
             return {
-                "state": response.json(),
-                "thread_id": thread_id,
+                "state": state_data,
+                "thread_id": str(thread_id),
                 "status": "success"
             }
             
@@ -485,8 +493,12 @@ async def list_threads(
             )
             response.raise_for_status()
             
+            # Convert to string to ensure JSON serializability
+            threads_data = response.text
+            
             return {
-                "threads": response.json(),
+                "threads": threads_data,
+                "count": limit,
                 "status": "success"
             }
             
@@ -519,7 +531,7 @@ async def echo(text: str) -> dict:
     Returns:
         Dictionary with echoed text
     """
-    return {"echo": text}
+    return {"echo": str(text), "status": "success"}
 
 
 @mcp.tool()

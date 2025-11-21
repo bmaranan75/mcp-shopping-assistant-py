@@ -51,10 +51,18 @@ OAUTH_CLIENT_SECRET = os.getenv("CHATGPT_OAUTH_CLIENT_SECRET", "")
 OAUTH_TOKEN_EXPIRY = int(os.getenv("CHATGPT_OAUTH_TOKEN_EXPIRY", "3600"))
 OAUTH_ISSUER = os.getenv("OAUTH_ISSUER", SERVER_URL)
 OAUTH_TOKEN_ENDPOINT = os.getenv("OAUTH_TOKEN_ENDPOINT", f"{SERVER_URL}/oauth/token")
+OAUTH_AUTHORIZE_URL = os.getenv(
+    "OAUTH_AUTHORIZE_URL",
+    f"{SERVER_URL}/oauth/authorize"
+)
 
 # Okta Configuration (for external token validation)
-OKTA_INTROSPECT_URL = os.getenv("OKTA_INTROSPECT_URL", "")
 OKTA_DOMAIN = os.getenv("OKTA_DOMAIN", "")
+OKTA_AUTHORIZE_URL = os.getenv(
+    "OKTA_AUTHORIZE_URL",
+    f"https://{OKTA_DOMAIN}/oauth2/default/v1/authorize" if OKTA_DOMAIN else ""
+)
+OKTA_INTROSPECT_URL = os.getenv("OKTA_INTROSPECT_URL", "")
 
 # In-memory token storage (use Redis in production)
 active_tokens: Dict[str, Dict[str, Any]] = {}
@@ -85,11 +93,15 @@ class TokenResponse(BaseModel):
 security = HTTPBearer(auto_error=False)
 
 
-async def validate_okta_token(token: str) -> bool:
-    """Validate token with Okta introspection endpoint."""
+async def validate_okta_token(token: str) -> Optional[Dict[str, Any]]:
+    """Validate token with Okta introspection endpoint.
+    
+    Returns:
+        Token info dict if valid, None if invalid
+    """
     if not OKTA_INTROSPECT_URL:
         print("⚠️  Okta introspection URL not configured")
-        return False
+        return None
     
     try:
         print(f"🔍 Validating token with Okta: {OKTA_INTROSPECT_URL}")
@@ -109,17 +121,17 @@ async def validate_okta_token(token: str) -> bool:
                 is_active = data.get("active", False)
                 if is_active:
                     print("✓ Okta token is active and valid")
-                    return True
+                    return data
                 else:
                     print("✗ Okta token is inactive or invalid")
-                    return False
+                    return None
             else:
                 print(f"✗ Okta introspection failed: {response.status_code}")
                 print(f"Response: {response.text}")
-                return False
+                return None
     except Exception as e:
         print(f"✗ Error validating token with Okta: {e}")
-        return False
+        return None
 
 
 async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -140,10 +152,29 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
         print(f"Active tokens in memory: {len(active_tokens)}")
         print(f"API keys configured: {len(API_KEYS)}")
         print("=" * 80 + "\n")
+        # Build re-authentication URL
+        reauth_url = (
+            f"{OKTA_AUTHORIZE_URL or OAUTH_AUTHORIZE_URL}?"
+            f"client_id={OAUTH_CLIENT_ID}&"
+            f"response_type=code&"
+            f"scope=openid%20profile%20email&"
+            f"redirect_uri={SERVER_URL}/oauth/callback"
+        )
+        # Return OAuth-compliant error with re-auth link
         raise HTTPException(
             status_code=401,
-            detail="Authentication required",
-            headers={"WWW-Authenticate": "Bearer"}
+            detail=(
+                f"invalid_token: Authentication required. "
+                f"Please authenticate here: {reauth_url}"
+            ),
+            headers={
+                "WWW-Authenticate": (
+                    'Bearer realm="ChatGPT", '
+                    'error="invalid_token", '
+                    'error_description="Authentication required"'
+                ),
+                "X-Reauth-URL": reauth_url
+            }
         )
     
     token = credentials.credentials
@@ -168,14 +199,32 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
             print("=" * 80 + "\n")
             return token_data
         else:
-            # Token expired
+            # Token expired - return OAuth-compliant error for re-auth
             del active_tokens[token]
             print("✗ Token expired, removing from active tokens")
             print("=" * 80 + "\n")
+            # Build re-authentication URL
+            reauth_url = (
+                f"{OKTA_AUTHORIZE_URL or OAUTH_AUTHORIZE_URL}?"
+                f"client_id={OAUTH_CLIENT_ID}&"
+                f"response_type=code&"
+                f"scope=openid%20profile%20email&"
+                f"redirect_uri={SERVER_URL}/oauth/callback"
+            )
             raise HTTPException(
                 status_code=401,
-                detail="Token expired",
-                headers={"WWW-Authenticate": "Bearer"}
+                detail=(
+                    f"invalid_token: The access token expired. "
+                    f"Please re-authenticate: {reauth_url}"
+                ),
+                headers={
+                    "WWW-Authenticate": (
+                        'Bearer realm="ChatGPT", '
+                        'error="invalid_token", '
+                        'error_description="The access token expired"'
+                    ),
+                    "X-Reauth-URL": reauth_url
+                }
             )
     
     # Check if it's a valid API key
@@ -195,20 +244,44 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
     print(f"Okta introspection URL configured: {bool(OKTA_INTROSPECT_URL)}")
     
     if OKTA_INTROSPECT_URL:
-        is_valid = await validate_okta_token(token)
-        if is_valid:
+        token_info = await validate_okta_token(token)
+        if token_info:
             print("✓ Token validated by Okta")
             print("=" * 80 + "\n")
-            return {"type": "okta_token", "valid": True}
+            return {
+                "type": "okta_token",
+                "valid": True,
+                "token": token,
+                "token_info": token_info
+            }
     
     print("✗ Invalid token - not found in active tokens, API keys, or Okta")
     print(f"Token to validate: {token[:30]}...")
     print(f"Active tokens: {list(active_tokens.keys())[:3]}..." if active_tokens else "Active tokens: []")
     print("=" * 80 + "\n")
+    # Build re-authentication URL
+    reauth_url = (
+        f"{OKTA_AUTHORIZE_URL or OAUTH_AUTHORIZE_URL}?"
+        f"client_id={OAUTH_CLIENT_ID}&"
+        f"response_type=code&"
+        f"scope=openid%20profile%20email&"
+        f"redirect_uri={SERVER_URL}/oauth/callback"
+    )
+    # Return OAuth-compliant error with re-auth link
     raise HTTPException(
         status_code=401,
-        detail="Invalid token or API key",
-        headers={"WWW-Authenticate": "Bearer"}
+        detail=(
+            f"invalid_token: The access token is invalid. "
+            f"Please re-authenticate: {reauth_url}"
+        ),
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="ChatGPT", '
+                'error="invalid_token", '
+                'error_description="The access token is invalid"'
+            ),
+            "X-Reauth-URL": reauth_url
+        }
     )
 
 
@@ -305,22 +378,280 @@ class ToolCallParams(BaseModel):
 
 async def invoke_langgraph_agent(
     prompt: str,
-    assistant_id: str = "agent",
-    thread_id: Optional[str] = None
+    assistant_id: str = "supervisor",
+    thread_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    conversation_id: Optional[str] = None
 ) -> dict:
     """
     Invoke the LangGraph agent with a prompt.
     
     Args:
         prompt: The user prompt/query
-        assistant_id: The assistant/agent ID (default: "agent")
+        assistant_id: The assistant/agent ID (default: "supervisor")
         thread_id: Optional thread ID for conversation continuity
+        user_id: Optional user ID from authentication
+        conversation_id: Optional conversation ID from ChatGPT
     
     Returns:
         Agent response with output and metadata
     """
     try:
+        # Generate thread_id if not provided
+        if not thread_id:
+            thread_id = f"thread-{secrets.token_urlsafe(16)}"
+            print(f"DEBUG: Generated thread_id: {thread_id}")
+        
+        # Generate conversation_id if not provided
+        if not conversation_id:
+            conversation_id = f"conv-{secrets.token_urlsafe(16)}"
+            print(f"DEBUG: Generated conversation_id: {conversation_id}")
+        
         async with httpx.AsyncClient(timeout=120.0) as client:
+            # Build input with messages
+            payload = {
+                "assistant_id": assistant_id,
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                }
+            }
+            
+            # Add userId to input if available
+            if user_id:
+                payload["input"]["userId"] = user_id
+            
+            # Add conversationId to input
+            payload["input"]["conversationId"] = conversation_id
+            
+            # Add thread_id to config for conversation persistence
+            payload["config"] = {
+                "configurable": {
+                    "thread_id": thread_id
+                }
+            }
+            
+            print(
+                f"DEBUG: Payload to supervisor - "
+                f"userId: {user_id}, "
+                f"conversationId: {conversation_id}, "
+                f"thread_id: {thread_id}"
+            )
+            
+            # Use /runs/stream endpoint which returns SSE format
+            stream_url = f"{LANGGRAPH_BASE_URL}/runs/stream"
+            print(f"DEBUG: Calling {stream_url}")
+            
+            async with client.stream(
+                "POST",
+                stream_url,
+                json=payload
+            ) as response:
+                print(f"DEBUG: Response status: {response.status_code}")
+                
+                # Check for error before parsing
+                if response.status_code >= 400:
+                    error_text = b""
+                    async for chunk in response.aiter_bytes():
+                        error_text += chunk
+                    print(
+                        f"ERROR: LangGraph returned "
+                        f"{response.status_code}"
+                    )
+                    print(f"ERROR: Response: {error_text.decode()}")
+                    raise httpx.HTTPStatusError(
+                        f"LangGraph error: {response.status_code}",
+                        request=response.request,
+                        response=response
+                    )
+                
+                response.raise_for_status()
+                
+                # Parse Server-Sent Events (SSE) format
+                run_id = None
+                final_messages = []
+                all_message_snapshots = []  # Track all snapshots
+                current_event = None
+                current_data = []
+                
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    
+                    if line.startswith("event:"):
+                        # Save previous event data if exists
+                        if current_event and current_data:
+                            data_str = "\n".join(current_data)
+                            try:
+                                data_obj = json.loads(data_str)
+                                if current_event == "metadata" and "run_id" in data_obj:
+                                    run_id = data_obj["run_id"]
+                                elif current_event == "values" and "messages" in data_obj:
+                                    # Keep ALL values events, last one wins
+                                    final_messages = data_obj["messages"]
+                                    all_message_snapshots.append(
+                                        data_obj["messages"]
+                                    )
+                                    print(f"DEBUG: Captured values event with "
+                                          f"{len(final_messages)} messages")
+                            except json.JSONDecodeError:
+                                pass
+                        
+                        # Start new event
+                        current_event = line.split(":", 1)[1].strip()
+                        current_data = []
+                    
+                    elif line.startswith("data:"):
+                        # Accumulate data lines
+                        data_content = line.split(":", 1)[1].strip()
+                        current_data.append(data_content)
+                    
+                    elif line == "":
+                        # Empty line marks end of event
+                        if current_event and current_data:
+                            data_str = "\n".join(current_data)
+                            try:
+                                data_obj = json.loads(data_str)
+                                if current_event == "metadata" and "run_id" in data_obj:
+                                    run_id = data_obj["run_id"]
+                                elif current_event == "values" and "messages" in data_obj:
+                                    # Keep ALL values events, last one wins
+                                    final_messages = data_obj["messages"]
+                                    all_message_snapshots.append(
+                                        data_obj["messages"]
+                                    )
+                                    print(f"DEBUG: Captured values event with "
+                                          f"{len(final_messages)} messages")
+                            except json.JSONDecodeError:
+                                pass
+                        current_event = None
+                        current_data = []
+                
+                print(f"DEBUG: Total value snapshots received: "
+                      f"{len(all_message_snapshots)}")
+                
+                # Debug: Print final messages structure
+                print(f"DEBUG: Received {len(final_messages)} messages")
+                if final_messages:
+                    messages_json = json.dumps(
+                        final_messages[:3], indent=2
+                    )  # First 3 for brevity
+                    print(f"DEBUG: First messages: {messages_json}")
+                
+                # Extract the final assistant response
+                # SKIP ephemeral progress messages, return substantial content only
+                output_text = None
+                
+                for msg in reversed(final_messages):
+                    # Skip ephemeral progress messages entirely
+                    if msg.get("progress", {}).get("ephemeral"):
+                        print(f"DEBUG: Skipping ephemeral progress message")
+                        continue
+                    
+                    print(f"DEBUG: Checking message: {msg.get('type')} / "
+                          f"{msg.get('role')}")
+                    
+                    # Try different message structures
+                    is_assistant = (
+                        msg.get("role") == "assistant" or
+                        msg.get("type") == "ai" or
+                        msg.get("type") == "AIMessage"
+                    )
+                    
+                    if is_assistant:
+                        # Check for content in nested message object first
+                        content = None
+                        if "message" in msg and isinstance(
+                            msg["message"], dict
+                        ):
+                            content = msg["message"].get("content", "")
+                        elif "content" in msg:
+                            content = msg["content"]
+                        
+                        # Skip empty content or JSON objects
+                        if content and not str(content).startswith("{"):
+                            output_text = content
+                            print(f"DEBUG: Found substantial content from "
+                                  f"{msg.get('agent', 'unknown')}: "
+                                  f"{str(content)[:100]}")
+                            break
+                
+                # Final fallback only if no substantial content found
+                if not output_text:
+                    output_text = "Agent is processing your request. Please try again in a moment."
+                    print("DEBUG: No substantial content found, using fallback message")
+                
+                # Return MCP-compliant response format
+                # The messages should be in the content field per MCP spec
+                response = {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": str(output_text)
+                        }
+                    ],
+                    "isError": False
+                }
+                
+                print(f"DEBUG: Returning response with {len(str(output_text))} chars")
+                print(f"DEBUG: Response: {json.dumps(response)[:300]}")
+                
+                return response
+            
+    except httpx.HTTPError as e:
+        import traceback
+        error_detail = f"HTTP error invoking agent: {str(e)}"
+        print(f"ERROR: {error_detail}")
+        print(f"Traceback:\n{traceback.format_exc()}")
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": error_detail
+                }
+            ],
+            "isError": True
+        }
+    except Exception as e:
+        import traceback
+        error_detail = f"Error invoking agent: {str(e)}"
+        print(f"ERROR: {error_detail}")
+        print(f"Traceback:\n{traceback.format_exc()}")
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": error_detail
+                }
+            ],
+            "isError": True
+        }
+
+
+async def stream_langgraph_agent(
+    prompt: str,
+    assistant_id: str = "supervisor",
+    thread_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    conversation_id: Optional[str] = None
+) -> dict:
+    """Stream responses from the LangGraph agent."""
+    try:
+        # Generate thread_id if not provided
+        if not thread_id:
+            thread_id = f"thread-{secrets.token_urlsafe(16)}"
+            print(f"DEBUG: Generated thread_id: {thread_id}")
+        
+        # Generate conversation_id if not provided
+        if not conversation_id:
+            conversation_id = f"conv-{secrets.token_urlsafe(16)}"
+            print(f"DEBUG: Generated conversation_id: {conversation_id}")
+        
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # Build input with messages
             payload = {
                 "assistant_id": assistant_id,
                 "input": {
@@ -331,73 +662,29 @@ async def invoke_langgraph_agent(
                         }
                     ]
                 },
-                "stream_mode": ["values"]
+                "stream_mode": ["messages"]
             }
             
-            if thread_id:
-                payload["thread_id"] = thread_id
+            # Add userId to input if available
+            if user_id:
+                payload["input"]["userId"] = user_id
             
-            async with client.stream(
-                "POST",
-                f"{LANGGRAPH_BASE_URL}/runs/stream",
-                json=payload
-            ) as response:
-                response.raise_for_status()
-                
-                chunks = []
-                run_id = None
-                thread_id_result = None
-                final_output = None
-                
-                async for chunk in response.aiter_text():
-                    if chunk.strip():
-                        chunks.append(chunk)
-                        try:
-                            data = json.loads(chunk)
-                            if isinstance(data, list) and len(data) > 0:
-                                if "run_id" in data[0]:
-                                    run_id = data[0]["run_id"]
-                                if "thread_id" in data[0]:
-                                    thread_id_result = data[0]["thread_id"]
-                                final_output = data
-                        except json.JSONDecodeError:
-                            pass
-                
-                return {
-                    "run_id": run_id or "unknown",
-                    "thread_id": thread_id_result or "unknown",
-                    "output": final_output or {"messages": chunks},
-                    "status": "success"
-                }
-    except Exception as e:
-        return {
-            "error": str(e),
-            "status": "failed"
-        }
-
-
-async def stream_langgraph_agent(
-    prompt: str,
-    assistant_id: str = "agent",
-    thread_id: Optional[str] = None
-) -> dict:
-    """Stream responses from the LangGraph agent."""
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            payload = {
-                "assistant_id": assistant_id,
-                "input": {
-                    "messages": [
-                        {
-                            "type": "human",
-                            "content": prompt
-                        }
-                    ]
+            # Add conversationId to input
+            payload["input"]["conversationId"] = conversation_id
+            
+            # Add thread_id to config for conversation persistence
+            payload["config"] = {
+                "configurable": {
+                    "thread_id": thread_id
                 }
             }
             
-            if thread_id:
-                payload["thread_id"] = thread_id
+            print(
+                f"DEBUG: Stream payload - "
+                f"userId: {user_id}, "
+                f"conversationId: {conversation_id}, "
+                f"thread_id: {thread_id}"
+            )
             
             async with client.stream(
                 "POST",
@@ -416,14 +703,28 @@ async def stream_langgraph_agent(
                     "chunks_received": len(chunks),
                     "status": "success"
                 }
-    except Exception as e:
+                
+    except httpx.HTTPError as e:
+        import traceback
+        error_detail = f"HTTP error streaming from agent: {str(e)}"
+        print(f"ERROR: {error_detail}")
+        print(f"Traceback:\n{traceback.format_exc()}")
         return {
-            "error": str(e),
+            "error": error_detail,
+            "status": "failed"
+        }
+    except Exception as e:
+        import traceback
+        error_detail = f"Error streaming from agent: {str(e)}"
+        print(f"ERROR: {error_detail}")
+        print(f"Traceback:\n{traceback.format_exc()}")
+        return {
+            "error": error_detail,
             "status": "failed"
         }
 
 
-async def check_system_health_tool(assistant_id: str = "health") -> dict:
+async def check_system_health_tool(assistant_id: str = "supervisor") -> dict:
     """Check comprehensive system health."""
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -459,13 +760,14 @@ async def check_system_health_tool(assistant_id: str = "health") -> dict:
                             if isinstance(data, list) and len(data) > 0:
                                 if "run_id" in data[0]:
                                     run_id = data[0]["run_id"]
-                                final_output = data
+                                # Store as string to avoid parsing issues
+                                final_output = chunk
                         except json.JSONDecodeError:
                             pass
                 
                 return {
-                    "health_check": final_output or {"messages": chunks},
-                    "run_id": run_id or "unknown",
+                    "health_check": final_output or "".join(chunks),
+                    "run_id": str(run_id or "unknown"),
                     "status": "success"
                 }
     except Exception as e:
@@ -475,7 +777,7 @@ async def check_system_health_tool(assistant_id: str = "health") -> dict:
         }
 
 
-async def check_agent_status_tool(agent_name: str, assistant_id: str = "health") -> dict:
+async def check_agent_status_tool(agent_name: str, assistant_id: str = "supervisor") -> dict:
     """Check the status of a specific agent."""
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -511,14 +813,15 @@ async def check_agent_status_tool(agent_name: str, assistant_id: str = "health")
                             if isinstance(data, list) and len(data) > 0:
                                 if "run_id" in data[0]:
                                     run_id = data[0]["run_id"]
-                                final_output = data
+                                # Store as string to avoid parsing issues
+                                final_output = chunk
                         except json.JSONDecodeError:
                             pass
                 
                 return {
-                    "agent": agent_name,
-                    "status_check": final_output or {"messages": chunks},
-                    "run_id": run_id or "unknown",
+                    "agent": str(agent_name),
+                    "status_check": final_output or "".join(chunks),
+                    "run_id": str(run_id or "unknown"),
                     "status": "success"
                 }
     except Exception as e:
@@ -537,9 +840,12 @@ async def get_thread_state_tool(thread_id: str) -> dict:
             )
             response.raise_for_status()
             
+            # Convert to string to ensure JSON serializability
+            state_data = response.text
+            
             return {
-                "state": response.json(),
-                "thread_id": thread_id,
+                "state": state_data,
+                "thread_id": str(thread_id),
                 "status": "success"
             }
     except Exception as e:
@@ -559,8 +865,12 @@ async def list_threads_tool(limit: int = 10) -> dict:
             )
             response.raise_for_status()
             
+            # Convert to string to ensure JSON serializability
+            threads_data = response.text
+            
             return {
-                "threads": response.json(),
+                "threads": threads_data,
+                "count": limit,
                 "status": "success"
             }
     except Exception as e:
@@ -574,21 +884,52 @@ async def list_threads_tool(limit: int = 10) -> dict:
 # Tool Router
 # ============================================================================
 
-async def execute_tool(tool_name: str, arguments: dict) -> dict:
+async def execute_tool(
+    tool_name: str,
+    arguments: dict,
+    auth: dict = None
+) -> dict:
     """
     Execute a tool by name with given arguments.
     
     Args:
         tool_name: Name of the tool to execute
         arguments: Tool arguments
+        auth: Authentication context (contains token_info for userId)
     
     Returns:
         Tool execution result
     """
+    # Extract userId from auth token if available
+    user_id = None
+    if auth and auth.get("token_info"):
+        token_info = auth["token_info"]
+        user_id = (
+            token_info.get("sub") or
+            token_info.get("uid") or
+            token_info.get("username") or
+            token_info.get("email") or
+            token_info.get("client_id")
+        )
+        print(f"DEBUG: Extracted userId from token: {user_id}")
+    elif auth and auth.get("method") == "api_key":
+        print("DEBUG: API key auth - no userId available")
+    
+    # Get conversationId from arguments if passed by ChatGPT
+    conversation_id = arguments.get("conversationId")
+    
     # Echo tool
     if tool_name == "echo":
         text = arguments.get("text", "")
-        return {"echo": text}
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": str(text)
+                }
+            ],
+            "isError": False
+        }
     
     # Get server info
     elif tool_name == "get_server_info":
@@ -615,26 +956,34 @@ async def execute_tool(tool_name: str, arguments: dict) -> dict:
     # Invoke agent
     elif tool_name == "invoke_agent":
         prompt = arguments.get("prompt", "")
-        assistant_id = arguments.get("assistant_id", "agent")
+        # Always use supervisor assistant
+        assistant_id = "supervisor"
         thread_id = arguments.get("thread_id")
-        return await invoke_langgraph_agent(prompt, assistant_id, thread_id)
+        return await invoke_langgraph_agent(
+            prompt, assistant_id, thread_id, user_id, conversation_id
+        )
     
     # Stream agent
     elif tool_name == "stream_agent":
         prompt = arguments.get("prompt", "")
-        assistant_id = arguments.get("assistant_id", "agent")
+        # Always use supervisor assistant
+        assistant_id = "supervisor"
         thread_id = arguments.get("thread_id")
-        return await stream_langgraph_agent(prompt, assistant_id, thread_id)
+        return await stream_langgraph_agent(
+            prompt, assistant_id, thread_id, user_id, conversation_id
+        )
     
     # Check system health
     elif tool_name == "check_system_health":
-        assistant_id = arguments.get("assistant_id", "health")
+        # Always use supervisor assistant
+        assistant_id = "supervisor"
         return await check_system_health_tool(assistant_id)
     
     # Check agent status
     elif tool_name == "check_agent_status":
         agent_name = arguments.get("agent_name", "")
-        assistant_id = arguments.get("assistant_id", "health")
+        # Always use supervisor assistant
+        assistant_id = "supervisor"
         if not agent_name:
             return {"error": "agent_name is required", "status": "failed"}
         return await check_agent_status_tool(agent_name, assistant_id)
@@ -961,7 +1310,7 @@ async def list_tools():
                         "assistant_id": {
                             "type": "string",
                             "description": "Assistant ID to use",
-                            "default": "agent"
+                            "default": "supervisor"
                         },
                         "thread_id": {
                             "type": "string",
@@ -980,7 +1329,7 @@ async def list_tools():
                         "assistant_id": {
                             "type": "string",
                             "description": "Assistant ID to check",
-                            "default": "health"
+                            "default": "supervisor"
                         }
                     }
                 }
@@ -998,7 +1347,7 @@ async def list_tools():
                         "assistant_id": {
                             "type": "string",
                             "description": "Assistant ID to use",
-                            "default": "health"
+                            "default": "supervisor"
                         }
                     },
                     "required": ["agent_name"]
@@ -1183,8 +1532,8 @@ async def mcp_endpoint(
                     content=error_response
                 )
             
-            # Execute the tool
-            result = await execute_tool(tool_name, arguments)
+            # Execute the tool with auth context
+            result = await execute_tool(tool_name, arguments, auth)
             
             # Check if tool execution failed
             if result.get("status") == "failed":
