@@ -26,7 +26,7 @@ import secrets
 import time
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -35,6 +35,12 @@ import uvicorn
 
 # Load environment variables
 load_dotenv()
+
+# Import html_formatter
+try:
+    from .html_formatter import format_response_as_html, format_json_as_html
+except ImportError:
+    from html_formatter import format_response_as_html, format_json_as_html
 
 # Configuration
 LANGGRAPH_BASE_URL = os.getenv("LANGGRAPH_BASE_URL", "http://localhost:2024")
@@ -67,11 +73,39 @@ OKTA_INTROSPECT_URL = os.getenv("OKTA_INTROSPECT_URL", "")
 # In-memory token storage (use Redis in production)
 active_tokens: Dict[str, Dict[str, Any]] = {}
 
+# In-memory response storage for iframe display
+response_storage: Dict[str, Dict[str, Any]] = {}
+
 # Initialize FastAPI
 app = FastAPI(
     title="LangGraph Agent MCP Server",
-    description="ChatGPT Enterprise compatible MCP server for LangGraph agents",
-    version="1.0.0"
+    description="""ChatGPT Enterprise compatible MCP server for LangGraph agents.
+
+**For ChatGPT Integration:**
+
+This API provides intelligent agent responses with HTML formatting support.
+When you call the `/mcp` endpoint with `invoke_agent`, the response will include:
+- Formatted HTML content for rich display
+- Plain text fallback
+- Resource URIs for iframe rendering
+
+**Response Handling Instructions:**
+1. Extract the response from `result.content[0].text`
+2. If HTML tags are present, render as formatted HTML
+3. Preserve formatting, tables, and lists
+4. For iframe resources, use the URI in `result.content[1].resource.uri`
+
+**Conversation Context:**
+- Include `thread_id` in follow-up requests to maintain context
+- The agent remembers previous queries within the same thread
+""",
+    version="1.0.0",
+    servers=[
+        {
+            "url": SERVER_URL,
+            "description": "ChatGPT MCP Server"
+        }
+    ]
 )
 
 # OAuth 2.0 Models
@@ -293,6 +327,94 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Customize OpenAPI schema to add ChatGPT-specific hints
+def custom_openapi():
+    """Enhanced OpenAPI schema with ChatGPT display instructions."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    from fastapi.openapi.utils import get_openapi
+    
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        servers=[{"url": SERVER_URL, "description": "ChatGPT MCP Server"}]
+    )
+    
+    # Add ChatGPT-specific plugin metadata
+    openapi_schema["x-chatgpt-plugin"] = {
+        "response_format": "html",
+        "render_mode": "rich",
+        "preserve_html_styling": True,
+        "mcp_protocol_version": "2024-11-05",
+        "capabilities": [
+            "html_formatted_responses",
+            "iframe_resources",
+            "conversation_threads",
+            "multi_turn_context"
+        ]
+    }
+    
+    # Add display hints to /mcp endpoint
+    if "/mcp" in openapi_schema.get("paths", {}):
+        mcp_post = openapi_schema["paths"]["/mcp"].get("post", {})
+        mcp_post["x-chatgpt-display"] = {
+            "format": "html",
+            "content_extraction": "result.content[0].text",
+            "resource_uri": "result.content[1].resource.uri",
+            "render_html": True,
+            "show_iframe": True,
+            "preserve_styling": True
+        }
+        mcp_post["description"] = """JSON-RPC 2.0 endpoint for MCP protocol.
+
+**For ChatGPT - Response Format:**
+The `tools/call` method with `invoke_agent` returns:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "...",
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "HTML formatted response here"
+      },
+      {
+        "type": "resource",
+        "resource": {
+          "uri": "https://server/response/abc123",
+          "mimeType": "text/html",
+          "text": "same content"
+        }
+      }
+    ]
+  }
+}
+```
+
+**Display Instructions:**
+1. Extract `result.content[0].text` 
+2. If it contains HTML tags (`<`, `>`), render as formatted HTML
+3. Display tables, lists, headings with proper formatting
+4. Optionally: Load `result.content[1].resource.uri` in iframe for enhanced display
+5. Preserve thread_id for follow-up queries
+
+**Available Methods:**
+- `initialize`: Initialize MCP session
+- `tools/list`: List available tools  
+- `tools/call`: Execute tools (use `invoke_agent` for queries)
+"""
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 
 # ============================================================================
@@ -584,20 +706,36 @@ async def invoke_langgraph_agent(
                     output_text = "Agent is processing your request. Please try again in a moment."
                     print("DEBUG: No substantial content found, using fallback message")
                 
-                # Return MCP-compliant response format
-                # The messages should be in the content field per MCP spec
+                # Store response as HTML resource
+                resource_url = store_response_for_iframe(
+                    content=output_text,
+                    title="Agent Response",
+                    format_type="text"
+                )
+                
+                # Return both text and resource types for maximum compatibility
+                # ChatGPT needs the text type to display, resource type provides enhanced formatting
                 response = {
                     "content": [
                         {
                             "type": "text",
-                            "text": str(output_text)
+                            "text": output_text
+                        },
+                        {
+                            "type": "resource",
+                            "resource": {
+                                "uri": resource_url,
+                                "mimeType": "text/html",
+                                "text": output_text
+                            }
                         }
                     ],
                     "isError": False
                 }
                 
                 print(f"DEBUG: Returning response with {len(str(output_text))} chars")
-                print(f"DEBUG: Response: {json.dumps(response)[:300]}")
+                print(f"DEBUG: Resource URI: {resource_url}")
+                print(f"DEBUG: Response preview: {str(output_text)[:200]}...")
                 
                 return response
             
@@ -1206,6 +1344,75 @@ async def openid_configuration_mcp():
 async def mcp_openid_configuration():
     """OpenID Connect Discovery under /mcp path."""
     return await openid_configuration()
+
+
+# ============================================================================
+# HTML Response Endpoints (for iframe display)
+# ============================================================================
+
+@app.get("/response/{response_id}", response_class=HTMLResponse)
+async def get_formatted_response(response_id: str):
+    """
+    Get a formatted HTML response for iframe display.
+    
+    Args:
+        response_id: The unique response ID
+        
+    Returns:
+        Formatted HTML response
+    """
+    if response_id not in response_storage:
+        return HTMLResponse(
+            content=format_response_as_html(
+                "Response not found or expired",
+                "Error"
+            ),
+            status_code=404
+        )
+    
+    stored_data = response_storage[response_id]
+    content = stored_data.get("content", "")
+    title = stored_data.get("title", "Agent Response")
+    format_type = stored_data.get("format", "text")
+    
+    if format_type == "json":
+        html_content = format_json_as_html(content, title)
+    else:
+        html_content = format_response_as_html(str(content), title)
+    
+    return HTMLResponse(content=html_content)
+
+
+def store_response_for_iframe(content: Any, title: str = "Agent Response", format_type: str = "text") -> str:
+    """
+    Store a response and return an iframe-compatible URL.
+    
+    Args:
+        content: The content to store (string or dict)
+        title: The title for the HTML page
+        format_type: The format type ('text' or 'json')
+        
+    Returns:
+        The URL to access the formatted response
+    """
+    response_id = secrets.token_urlsafe(16)
+    response_storage[response_id] = {
+        "content": content,
+        "title": title,
+        "format": format_type,
+        "timestamp": time.time()
+    }
+    
+    # Clean up old responses (older than 1 hour)
+    current_time = time.time()
+    expired_ids = [
+        rid for rid, data in response_storage.items()
+        if current_time - data.get("timestamp", 0) > 3600
+    ]
+    for rid in expired_ids:
+        del response_storage[rid]
+    
+    return f"{SERVER_URL}/response/{response_id}"
 
 
 # ============================================================================

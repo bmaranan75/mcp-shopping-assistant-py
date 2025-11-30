@@ -145,6 +145,40 @@ def custom_openapi():
                     )
                     if not is_public and isinstance(operation, dict):
                         operation["security"] = [{"ApiKeyAuth": []}]
+                    
+                    # Add custom ChatGPT hints for agent endpoints
+                    if isinstance(operation, dict):
+                        if path == "/invoke" and method == "post":
+                            operation["x-openai-isConsequential"] = False
+                            operation["x-chatgpt-display"] = {
+                                "format": "html",
+                                "content_field": "output.content",
+                                "render_html": True,
+                                "preserve_styling": True,
+                                "show_metadata": False
+                            }
+                        elif path == "/stream" and method == "post":
+                            operation["x-openai-isConsequential"] = False
+                            operation["x-chatgpt-display"] = {
+                                "format": "html",
+                                "content_field": "output",
+                                "render_html": True,
+                                "preserve_styling": True,
+                                "progressive_display": True
+                            }
+    
+    # Add global extensions for ChatGPT
+    openapi_schema["x-chatgpt-plugin"] = {
+        "response_format": "html",
+        "render_mode": "rich",
+        "preserve_html_styling": True,
+        "capabilities": [
+            "product_recommendations",
+            "shopping_assistance",
+            "comparative_analysis",
+            "html_formatted_responses"
+        ]
+    }
     
     app.openapi_schema = openapi_schema
     return app.openapi_schema
@@ -360,66 +394,142 @@ oauth2_scheme = OAuth2ClientCredentials(
 # ==========================================
 
 class InvokeRequest(BaseModel):
-    """Request model for invoking the agent."""
+    """Request model for invoking the agent.
+    
+    ChatGPT: Send user queries to the LangGraph AI agent for complex reasoning,
+    product recommendations, shopping assistance, and detailed analysis.
+    """
     prompt: str = Field(
         ...,
-        description="The user prompt/query to send to the agent",
-        example="What is the weather like today?"
+        description="The user's natural language query or request. Be specific and include all relevant context.",
+        examples=[
+            "What are the best winter hiking boots under $200?",
+            "Compare iPhone 15 Pro and Samsung Galaxy S24 for photography",
+            "Help me plan a shopping list for a weekend camping trip"
+        ]
     )
     assistant_id: str = Field(
         default="supervisor",
-        description="The assistant/agent ID to invoke",
-        example="supervisor"
+        description="The AI assistant to invoke. Use 'supervisor' for general queries and intelligent task routing.",
+        examples=["supervisor", "shopping", "analysis"]
     )
     thread_id: Optional[str] = Field(
         default=None,
-        description="Optional thread ID for conversation continuity",
-        example="thread-abc-123"
+        description="Conversation thread ID for multi-turn dialogs. IMPORTANT: Preserve this value across related follow-up questions to maintain context.",
+        examples=["thread-abc-123", "thread-user-session-456"]
     )
     conversationId: Optional[str] = Field(
         default=None,
-        description="Optional conversation ID from ChatGPT",
-        example="conv-abc-123"
+        description="ChatGPT conversation identifier for tracking user sessions and privacy compliance.",
+        examples=["conv-abc-123", "chatgpt-conv-xyz-789"]
     )
 
 
 class InvokeResponse(BaseModel):
-    """Response model for agent invocation."""
-    run_id: str = Field(..., description="The run ID")
-    thread_id: str = Field(..., description="The thread ID")
-    output: Dict[str, Any] = Field(..., description="Agent response")
-    status: str = Field(..., description="Status", example="success")
+    """Response model for agent invocation.
+    
+    ChatGPT DISPLAY INSTRUCTIONS:
+    1. Extract the 'content' field from 'output' object
+    2. If content contains HTML tags, render it as formatted HTML
+    3. Present the response in a visually appealing format with proper styling
+    4. Preserve the thread_id for follow-up questions
+    5. Do NOT show run_id or internal metadata to users unless debugging
+    """
+    run_id: str = Field(
+        ..., 
+        description="Internal execution identifier - used for debugging and tracking. Do not display to users."
+    )
+    thread_id: str = Field(
+        ..., 
+        description="Conversation thread ID - CRITICAL: Save and reuse this for follow-up questions to maintain conversation context."
+    )
+    output: Dict[str, Any] = Field(
+        ..., 
+        description="""The agent's response object. 
+        
+        CHATGPT INSTRUCTIONS FOR DISPLAYING THIS FIELD:
+        - Extract output['content'] or output['all_messages'][-1]['content']
+        - If the content contains HTML markup (<div>, <table>, <ul>, etc.), render it as formatted HTML
+        - Display product listings, comparisons, and structured data in rich HTML format
+        - Use proper styling for tables, lists, and formatting elements
+        - Present the information naturally and conversationally
+        - For multi-part responses, organize sections with headers
+        
+        The response may include:
+        - HTML formatted product recommendations
+        - Comparison tables with styling
+        - Structured lists and bullet points
+        - Rich text with emphasis and links
+        """
+    )
+    status: str = Field(
+        ..., 
+        description="Execution status: 'success' means the response is ready to display, 'failed' means an error occurred.",
+        examples=["success", "failed"]
+    )
 
 
 class StreamRequest(BaseModel):
-    """Request model for streaming agent responses."""
+    """Request model for streaming agent responses.
+    
+    ChatGPT: Use this for longer queries that benefit from incremental display,
+    such as detailed explanations, step-by-step guides, or lengthy analyses.
+    """
     prompt: str = Field(
         ...,
-        description="The user prompt/query",
-        example="Explain quantum computing"
+        description="The user's detailed query or complex request requiring streaming response.",
+        examples=[
+            "Explain the complete process of selecting winter camping gear step by step",
+            "Provide a comprehensive comparison of top 5 smartphones in 2025"
+        ]
     )
     assistant_id: str = Field(
         default="supervisor",
-        description="The assistant/agent ID",
-        example="supervisor"
+        description="The AI assistant to invoke. Default 'supervisor' routes to appropriate specialized agents.",
+        examples=["supervisor", "shopping", "analysis"]
     )
     thread_id: Optional[str] = Field(
         default=None,
-        description="Optional thread ID",
-        example="thread-xyz-789"
+        description="Conversation thread ID for maintaining context across multiple exchanges. Preserve this for related follow-ups.",
+        examples=["thread-xyz-789"]
     )
     conversationId: Optional[str] = Field(
         default=None,
-        description="Optional conversation ID from ChatGPT",
-        example="conv-xyz-789"
+        description="ChatGPT conversation identifier for session tracking and compliance.",
+        examples=["conv-xyz-789"]
     )
 
 
 class StreamResponse(BaseModel):
-    """Response model for streaming."""
-    output: str = Field(..., description="The streamed content")
-    chunks_received: int = Field(..., description="Chunks received")
-    status: str = Field(..., description="Status", example="success")
+    """Response model for streaming.
+    
+    ChatGPT DISPLAY INSTRUCTIONS:
+    - Parse the 'output' field which may contain HTML
+    - Render HTML elements properly (tables, lists, formatting)
+    - Display incrementally if the content supports it
+    - chunks_received is metadata - don't show to users
+    """
+    output: str = Field(
+        ..., 
+        description="""The complete streamed response content.
+        
+        CHATGPT: This field may contain HTML-formatted content. 
+        Render it as rich HTML with proper styling. Look for:
+        - Product tables and comparison grids
+        - Formatted lists and recommendations
+        - Styled sections and headers
+        Present the information in the most user-friendly format possible.
+        """
+    )
+    chunks_received: int = Field(
+        ..., 
+        description="Number of data chunks received during streaming - internal metric, do not display to users."
+    )
+    status: str = Field(
+        ..., 
+        description="Execution status indicator",
+        examples=["success", "failed"]
+    )
 
 
 class HealthResponse(BaseModel):
@@ -676,13 +786,22 @@ async def ai_plugin_manifest():
         "name_for_model": "langgraph_agent",
         "description_for_human": (
             "Access to LangGraph AI agents for complex reasoning, "
-            "analysis, and content generation."
+            "analysis, and content generation with rich HTML formatting."
         ),
         "description_for_model": (
             "You can invoke LangGraph agents to help with complex queries, "
             "detailed analysis, reasoning tasks, and content generation. "
             "Use the invoke endpoint for complete responses or stream "
-            "endpoint for longer queries."
+            "endpoint for longer queries. "
+            "\\n\\n**IMPORTANT DISPLAY INSTRUCTIONS:**\\n"
+            "- Responses contain HTML-formatted content\\n"
+            "- Render all HTML tags properly (tables, lists, divs, styling)\\n"
+            "- Extract content from output.content field\\n"
+            "- Display product recommendations, comparisons, and structured data in rich HTML format\\n"
+            "- Preserve colors, emphasis, and formatting\\n"
+            "- Make responses visually appealing and easy to scan\\n"
+            "- Use thread_id for multi-turn conversations\\n"
+            "- Do not show internal metadata like run_id to users"
         ),
         "auth": {
             "type": "service_http",
@@ -694,7 +813,16 @@ async def ai_plugin_manifest():
         "api": {
             "type": "openapi",
             "url": f"{SERVER_BASE_URL}/openapi.actions.json",
-            "is_user_authenticated": False
+            "is_user_authenticated": False,
+            "response_format": "html",
+            "supports_html_rendering": True
+        },
+        "capabilities": {
+            "html_responses": True,
+            "structured_data": True,
+            "conversation_memory": True,
+            "product_recommendations": True,
+            "comparative_analysis": True
         },
         "logo_url": f"{SERVER_BASE_URL}/logo.png",
         "contact_email": CONTACT_EMAIL,
@@ -1234,9 +1362,44 @@ async def test_endpoint():
 @app.post(
     "/invoke",
     response_model=InvokeResponse,
-    summary="Invoke Agent",
-    description="Invoke the LangGraph agent with a prompt",
-    tags=["Agent"]
+    summary="Ask LangGraph AI Agent",
+    description="""Invoke the LangGraph AI agent for intelligent responses to user queries.
+    
+    **ChatGPT Usage Guide:**
+    
+    🎯 **When to use this endpoint:**
+    - Product recommendations and shopping assistance
+    - Detailed comparisons and analysis
+    - Complex multi-step reasoning
+    - Information synthesis and research
+    
+    📋 **How to handle the response:**
+    1. Extract `output.content` from the response
+    2. **IMPORTANT**: If content contains HTML tags, render it as formatted HTML
+    3. Display tables, lists, and styled content with proper formatting
+    4. Present product recommendations in visually appealing format
+    5. Save `thread_id` for follow-up questions to maintain context
+    
+    🎨 **HTML Rendering:**
+    - The response may include rich HTML formatting
+    - Render `<table>`, `<ul>`, `<div>`, and styling elements properly
+    - Preserve colors, emphasis, and structured layouts
+    - Make the output user-friendly and visually organized
+    
+    💬 **Conversation Context:**
+    - Use `thread_id` from response for related follow-ups
+    - Include `conversationId` from ChatGPT for tracking
+    - This enables multi-turn conversations with memory
+    
+    ⚡ **Example Query Flow:**
+    User: "What are the best camping tents under $300?"
+    → Send to /invoke with prompt
+    → Receive HTML-formatted product comparison
+    → Display as rich, formatted content
+    → Save thread_id for "Tell me more about the first option"
+    """,
+    tags=["Agent"],
+    operation_id="invoke_langgraph_agent"
 )
 async def invoke_agent(
     request: InvokeRequest,
@@ -1380,6 +1543,8 @@ async def invoke_agent(
                 
                 # Extract the final assistant response
                 output_text = "Task completed"
+                html_content = None
+                
                 for msg in reversed(final_messages):
                     # Try different message structures
                     is_assistant = (
@@ -1398,12 +1563,15 @@ async def invoke_agent(
                         
                         if content and not str(content).startswith("{"):
                             output_text = content
+                            # Generate HTML-formatted version
+                            html_content = self._format_as_html(output_text)
                             break
                 
                 return {
                     "run_id": run_id or "unknown",
                     "thread_id": request.thread_id or "auto-generated",
                     "output": {
+                        "html_content": html_content or f"<div class='agent-response'><p>{output_text}</p></div>",
                         "content": output_text,
                         "all_messages": final_messages
                     },
@@ -1433,9 +1601,38 @@ async def invoke_agent(
 @app.post(
     "/stream",
     response_model=StreamResponse,
-    summary="Stream Agent Response",
-    description="Stream responses from the LangGraph agent",
-    tags=["Agent"]
+    summary="Stream AI Agent Response",
+    description="""Stream responses from the LangGraph agent for longer, detailed outputs.
+    
+    **ChatGPT Usage Guide:**
+    
+    🎯 **When to use streaming:**
+    - Long-form content and detailed explanations
+    - Step-by-step guides and tutorials
+    - Comprehensive product analyses
+    - Multi-section responses
+    
+    📋 **Response Handling:**
+    1. Parse the complete `output` field
+    2. **CRITICAL**: Render HTML content with proper formatting
+    3. Display tables, styled lists, and rich formatting elements
+    4. Organize sections with clear visual hierarchy
+    
+    🎨 **HTML Display Requirements:**
+    - Render all HTML tags properly (tables, lists, divs, spans)
+    - Preserve styling attributes and CSS classes
+    - Format product grids and comparison tables attractively
+    - Use proper spacing and visual organization
+    - Make structured data easy to scan and understand
+    
+    💡 **Best Practices:**
+    - Display content progressively if possible
+    - Maintain conversation context with thread_id
+    - Present information in user-friendly, scannable format
+    - Highlight key information and action items
+    """,
+    tags=["Agent"],
+    operation_id="stream_langgraph_agent"
 )
 async def stream_agent(
     request: StreamRequest,
